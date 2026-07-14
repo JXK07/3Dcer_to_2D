@@ -1,5 +1,3 @@
-"""Numerical geometry operations corresponding to the active Fortran path."""
-
 from __future__ import annotations
 
 import math
@@ -33,51 +31,74 @@ def redistribute(points: np.ndarray, count: int = NP_MAX) -> np.ndarray:
     return np.column_stack([np.interp(stations, arc, points[:, axis]) for axis in range(3)])
 
 
-def meridional_coordinate(z: np.ndarray, radius: np.ndarray) -> tuple[np.ndarray, float]:
+def _signed_meridional_increments(z: np.ndarray, radius: np.ndarray) -> np.ndarray:
+    """Return dimensional meridional steps signed in the global flow direction."""
     dz_flow, dr_flow = z[-1] - z[0], radius[-1] - radius[0]
     dz, dr = np.diff(z), np.diff(radius)
     dm = np.hypot(dz, dr)
     sign_source = np.where(np.abs(dz) >= np.abs(dr), dz_flow * dz, dr_flow * dr)
     signs = np.where(sign_source < 0.0, -1.0, 1.0)
+    return signs * dm
+
+
+def meridional_coordinate(z: np.ndarray, radius: np.ndarray) -> tuple[np.ndarray, float]:
+    signed_dm = _signed_meridional_increments(z, radius)
     average_radius = 0.5 * (radius[1:] + radius[:-1])
     if np.any(average_radius == 0.0):
         raise ValueError("m' is undefined where the average radius is zero")
-    return np.concatenate(([0.0], np.cumsum(signs * dm / average_radius))), float(np.sum(dm))
+    return (
+        np.concatenate(([0.0], np.cumsum(signed_dm / average_radius))),
+        float(np.sum(np.abs(signed_dm))),
+    )
 
 
 def dimensional_coordinates(section: BladeSection) -> DimensionalSection2D:
-    """Map a section to meridional arc length s and local circumferential arc u.
-
-    ``u = r(s) * (theta - theta_reference)`` is an exact circular arc length at
-    fixed ``s``.  It is not a globally isometric planar unfolding when radius
-    varies with ``s``; see README_TRANSBL.md for the induced metric.
-    """
-    # Match the active Fortran path: redistribute and integrate each surface
-    # independently, then apply only a linear streamwise correction so both
-    # trailing edges meet at the average terminal arc length.
+    """Integrate signed meridional and circumferential lengths on each surface."""
     sides = (redistribute(section.suction), redistribute(section.pressure))
     radii = [np.hypot(side[:, 0], side[:, 1]) for side in sides]
     theta = [np.unwrap(np.arctan2(side[:, 1], side[:, 0])) for side in sides]
     theta_reference = 0.5 * (theta[0][0] + theta[1][0])
     meridional_arcs = [
-        np.concatenate(
-            ([0.0], np.cumsum(np.hypot(np.diff(side[:, 2]), np.diff(radius))))
-        )
+        np.concatenate(([0.0], np.cumsum(_signed_meridional_increments(side[:, 2], radius))))
         for side, radius in zip(sides, radii)
     ]
-    common_te = 0.5 * (meridional_arcs[0][-1] + meridional_arcs[1][-1])
-    adjusted_arcs = []
+    circumferential_arcs = [
+        np.concatenate(
+            (
+                [0.0],
+                np.cumsum(0.5 * (radius[1:] + radius[:-1]) * np.diff(angle)),
+            )
+        )
+        for radius, angle in zip(radii, theta)
+    ]
+
+    common_s_te = 0.5 * (meridional_arcs[0][-1] + meridional_arcs[1][-1])
+    adjusted_s = []
     for arc in meridional_arcs:
         span = arc[-1] - arc[0]
         if span == 0.0:
             raise ValueError(f"section {section.index} has zero meridional arc length")
-        adjusted_arcs.append(arc + (common_te - arc[-1]) * (arc - arc[0]) / span)
+        adjusted_s.append(arc + (common_s_te - arc[-1]) * (arc - arc[0]) / span)
+
+    common_u_te = 0.5 * (
+        circumferential_arcs[0][-1] + circumferential_arcs[1][-1]
+    )
+    adjusted_u = []
+    for arc, streamwise in zip(circumferential_arcs, adjusted_s):
+        span = streamwise[-1] - streamwise[0]
+        adjusted_u.append(
+            arc
+            + (common_u_te - arc[-1])
+            * (streamwise - streamwise[0])
+            / span
+        )
+
     return DimensionalSection2D(
         section.index,
-        adjusted_arcs[0],
-        radii[0] * (theta[0] - theta_reference),
-        adjusted_arcs[1],
-        radii[1] * (theta[1] - theta_reference),
+        adjusted_s[0],
+        adjusted_u[0],
+        adjusted_s[1],
+        adjusted_u[1],
         float(theta_reference),
     )
 
