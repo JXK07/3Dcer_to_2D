@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""AG5-Cascade2D command-line entry point and legacy-compatible exports."""
 
 from cli import main
 from geometry import (
