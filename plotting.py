@@ -1,4 +1,4 @@
-"""Matplotlib result plots; no Tecplot files are produced."""
+"""Matplotlib result plots."""
 
 from __future__ import annotations
 
